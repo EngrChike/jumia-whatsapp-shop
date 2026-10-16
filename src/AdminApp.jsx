@@ -14,9 +14,14 @@ export default function AdminApp() {
   const [selectedBatchFilter, setSelectedBatchFilter] = useState('ALL');
   const [showArchived, setShowArchived] = useState(false);
 
-  // Bank App Security States (Linked to Supabase Auth)
+  // Bank App Security States & Secure Password Modal
   const [isFiguresHidden, setIsFiguresHidden] = useState(true);
   const [unlockedCustomers, setUnlockedCustomers] = useState({}); // { [customerId]: true }
+  
+  // Secure Password Modal States (replaces insecure browser prompt)
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [modalPasswordInput, setModalPasswordInput] = useState('');
+  const [unlockTarget, setUnlockTarget] = useState(null); // 'figures' or customerId
 
   // Inventory states
   const [name, setName] = useState('');
@@ -129,46 +134,59 @@ export default function AdminApp() {
 
   const handleAdminLogout = async () => await supabase.auth.signOut();
 
-  // SECURE VERIFICATION: Checks password against Supabase Auth backend
-  const verifyAdminPassword = async () => {
-    const password = prompt("Entrez votre mot de passe administrateur Supabase pour confirmer :");
-    if (!password) return false;
-    
+  // SECURE MODAL HANDLERS
+  const openPasswordModal = (target) => {
+    setUnlockTarget(target);
+    setModalPasswordInput('');
+    setIsPasswordModalOpen(true);
+  };
+
+  const handleConfirmPasswordVerification = async (e) => {
+    e.preventDefault();
+    if (!modalPasswordInput) return;
+
     if (!session?.user?.email) {
       alert("Erreur de session admin.");
-      return false;
+      setIsPasswordModalOpen(false);
+      return;
     }
 
     try {
       const { error } = await supabase.auth.signInWithPassword({
         email: session.user.email,
-        password: password
+        password: modalPasswordInput
       });
+
       if (error) {
         alert("Mot de passe incorrect !");
-        return false;
+        return;
       }
-      return true;
+
+      // Success! Unlock the requested target
+      if (unlockTarget === 'figures') {
+        setIsFiguresHidden(false);
+      } else {
+        setUnlockedCustomers(prev => ({ ...prev, [unlockTarget]: true }));
+      }
+
+      setIsPasswordModalOpen(false);
+      setModalPasswordInput('');
+      setUnlockTarget(null);
     } catch (err) {
       alert("Erreur de vérification.");
-      return false;
     }
   };
 
-  const toggleHideFigures = async () => {
+  const toggleHideFigures = () => {
     if (isFiguresHidden) {
-      const success = await verifyAdminPassword();
-      if (success) setIsFiguresHidden(false);
+      openPasswordModal('figures');
     } else {
       setIsFiguresHidden(true);
     }
   };
 
-  const handleUnlockCustomer = async (customerId) => {
-    const success = await verifyAdminPassword();
-    if (success) {
-      setUnlockedCustomers(prev => ({ ...prev, [customerId]: true }));
-    }
+  const handleUnlockCustomer = (customerId) => {
+    openPasswordModal(customerId);
   };
 
   // Calculate Next Payment Date (1 week after last transaction)
@@ -998,6 +1016,41 @@ export default function AdminApp() {
         )}
 
       </div>
+
+      {/* SECURE PASSWORD MODAL (WITH MASKED ***** INPUT) */}
+      {isPasswordModalOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white p-6 rounded-2xl w-full max-w-sm space-y-4 shadow-2xl border border-gray-200">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-black text-sm text-gray-900 uppercase flex items-center">
+                <Lock className="w-4 h-4 mr-1.5 text-amber-500" /> Mot de passe requis
+              </h3>
+              <button onClick={() => setIsPasswordModalOpen(false)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+            </div>
+            
+            <form onSubmit={handleConfirmPasswordVerification} className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500 block mb-1">Entrez votre mot de passe Admin :</label>
+                <input 
+                  type="password" 
+                  placeholder="••••••••" 
+                  value={modalPasswordInput} 
+                  onChange={e => setModalPasswordInput(e.target.value)} 
+                  className="w-full border p-3 rounded-xl text-sm font-bold tracking-widest bg-gray-50 focus:bg-white focus:ring-2 focus:ring-amber-500 focus:outline-none" 
+                  autoFocus
+                  required 
+                />
+                <p className="text-[10px] text-gray-400 mt-1">Les caractères sont masqués par sécurité.</p>
+              </div>
+
+              <div className="flex space-x-2 pt-1">
+                <button type="button" onClick={() => setIsPasswordModalOpen(false)} className="flex-1 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-xl uppercase">Annuler</button>
+                <button type="submit" className="flex-1 py-2.5 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold rounded-xl uppercase tracking-wider">Déverrouiller</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* EDITING SALE MODAL POPUP */}
       {editingSale && (
