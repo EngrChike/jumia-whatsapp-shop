@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './utils/supabaseClient';
-import { ShieldCheck, Trash2, Pencil, LogOut, Users, Package, Phone, CheckCircle, X, DollarSign, TrendingUp, Layers, Eye, Archive, RotateCcw } from 'lucide-react';
+import { ShieldCheck, Trash2, Pencil, LogOut, Users, Package, Phone, CheckCircle, X, DollarSign, TrendingUp, Layers, Eye, Archive, RotateCcw, Lock, Unlock, Calendar, Bell } from 'lucide-react';
 
 export default function AdminApp() {
   const [session, setSession] = useState(null);
@@ -13,6 +13,10 @@ export default function AdminApp() {
   const [products, setProducts] = useState([]);
   const [selectedBatchFilter, setSelectedBatchFilter] = useState('ALL');
   const [showArchived, setShowArchived] = useState(false);
+
+  // Bank App Security States (Linked to Supabase Auth)
+  const [isFiguresHidden, setIsFiguresHidden] = useState(true);
+  const [unlockedCustomers, setUnlockedCustomers] = useState({}); // { [customerId]: true }
 
   // Inventory states
   const [name, setName] = useState('');
@@ -29,7 +33,7 @@ export default function AdminApp() {
   // Customer Ledger
   const [customers, setCustomers] = useState([]);
   const [editingCustomer, setEditingCustomer] = useState(null);
-  const [editingSale, setEditingSale] = useState(null); // NEW: State for editing a sale
+  const [editingSale, setEditingSale] = useState(null);
 
   const [ledgerForm, setLedgerForm] = useState({ 
     customerId: '', 
@@ -56,7 +60,6 @@ export default function AdminApp() {
     localStorage.setItem('akuDonCart', JSON.stringify(cartItems));
   }, [cartItems]);
 
-  // FIX: Only fetch data when a session actually exists to prevent the "zero data" login bug
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -125,6 +128,60 @@ export default function AdminApp() {
   };
 
   const handleAdminLogout = async () => await supabase.auth.signOut();
+
+  // SECURE VERIFICATION: Checks password against Supabase Auth backend
+  const verifyAdminPassword = async () => {
+    const password = prompt("Entrez votre mot de passe administrateur Supabase pour confirmer :");
+    if (!password) return false;
+    
+    if (!session?.user?.email) {
+      alert("Erreur de session admin.");
+      return false;
+    }
+
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: session.user.email,
+        password: password
+      });
+      if (error) {
+        alert("Mot de passe incorrect !");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      alert("Erreur de vérification.");
+      return false;
+    }
+  };
+
+  const toggleHideFigures = async () => {
+    if (isFiguresHidden) {
+      const success = await verifyAdminPassword();
+      if (success) setIsFiguresHidden(false);
+    } else {
+      setIsFiguresHidden(true);
+    }
+  };
+
+  const handleUnlockCustomer = async (customerId) => {
+    const success = await verifyAdminPassword();
+    if (success) {
+      setUnlockedCustomers(prev => ({ ...prev, [customerId]: true }));
+    }
+  };
+
+  // Calculate Next Payment Date (1 week after last transaction)
+  const getNextPaymentDate = (customer) => {
+    if (!customer.history || customer.history.length === 0) return 'Aucune transaction';
+    const lastTx = customer.history[0];
+    let txDate = new Date(lastTx.date);
+    if (isNaN(txDate.getTime())) {
+      txDate = new Date();
+    }
+    const dueDate = new Date(txDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+    return dueDate.toLocaleDateString('fr-FR', { year: 'numeric', month: 'short', day: 'numeric' });
+  };
 
   const compressImage = (file, maxWidth = 800, maxHeight = 800, quality = 0.75) => {
     return new Promise((resolve, reject) => {
@@ -331,7 +388,6 @@ export default function AdminApp() {
     } catch (err) { alert(`Erreur lors de l'enregistrement: ${err.message}`); }
   };
 
-  // --- NEW: DELETE SALE & RESTORE STOCK ---
   const handleDeleteSale = async (customerId, historyRecord) => {
     if (!historyRecord.items || historyRecord.items.length === 0) {
       alert("Impossible d'annuler cette ancienne vente car les détails des articles sont manquants.");
@@ -341,7 +397,6 @@ export default function AdminApp() {
     if (!window.confirm("Voulez-vous vraiment annuler cette vente ? Les articles retourneront en stock et la dette sera recalculée.")) return;
   
     try {
-      // 1. Restore Stock
       for (const item of historyRecord.items) {
         if (item.productId) {
           const prod = products.find(p => String(p.id) === String(item.productId));
@@ -352,12 +407,10 @@ export default function AdminApp() {
         }
       }
   
-      // 2. Adjust Customer Debt
       const customer = customers.find(c => String(c.id) === String(customerId));
       const originalDebtAdded = (parseFloat(historyRecord.total) || 0) - (parseFloat(historyRecord.paid) || 0);
       const newDebt = Math.max(0, (parseFloat(customer?.totalDebt) || 0) - originalDebtAdded);
   
-      // 3. Check if customer should be deleted
       if (customer && customer.history.length === 1) {
         if (window.confirm("C'est la seule transaction de ce client. Voulez-vous également supprimer ce client de la base de données ?")) {
           await supabase.from('customers').delete().eq('id', customerId);
@@ -368,7 +421,6 @@ export default function AdminApp() {
         await supabase.from('customers').update({ total_debt: newDebt }).eq('id', customerId);
       }
   
-      // 4. Delete History Record
       await supabase.from('customer_history').delete().eq('id', historyRecord.id);
   
       alert('Vente annulée avec succès. Le stock a été mis à jour.');
@@ -379,7 +431,6 @@ export default function AdminApp() {
     }
   };
 
-  // --- NEW: EDIT SALE QUANTITY & ADJUST STOCK ---
   const handleSaveSaleEdit = async (e) => {
     e.preventDefault();
     try {
@@ -409,7 +460,6 @@ export default function AdminApp() {
         }
       }
 
-      // Calculate Debt Difference
       const originalDebtAdded = editingSale.total - editingSale.paid;
       const newDebtAdded = newTotal - editingSale.paid;
       const debtDifference = originalDebtAdded - newDebtAdded; 
@@ -447,7 +497,7 @@ export default function AdminApp() {
       if (updateErr) throw updateErr;
 
       const { error: histErr } = await supabase.from('customer_history').insert([{
-        customer_id: customerId, date: new Date().toLocaleString(), type: 'Payment', paid: payAmt,
+        customer_id: customerId, date: new Date().toISOString().split('T')[0], type: 'Payment', paid: payAmt,
         goods: 'Debt Reconciliation', total: 0, qty: 0, items: []
       }]);
       if (histErr) throw histErr;
@@ -510,6 +560,8 @@ export default function AdminApp() {
     return !p.is_archived && !isNaN(qty) && qty >= 1;
   });
 
+  const debtorsList = customers.filter(c => c.totalDebt > 0);
+
   if (!session) {
     return (
       <div className="min-h-screen bg-[#f5f5f7] flex items-center justify-center p-4">
@@ -539,7 +591,7 @@ export default function AdminApp() {
     <div className="min-h-screen bg-[#f5f5f7] text-gray-900 font-sans p-3 sm:p-6 lg:p-8 relative">
       <div className="max-w-7xl mx-auto space-y-6">
         
-        {/* HEADER */}
+        {/* HEADER & SECURITY TOGGLE */}
         <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
           <div className="flex flex-wrap gap-2 w-full sm:w-auto">
             <button onClick={() => setActiveTab('inventory')} className={`flex-1 sm:flex-none px-4 py-2 text-xs sm:text-sm font-bold rounded-lg flex items-center justify-center space-x-2 ${activeTab === 'inventory' ? 'bg-[#f68b1e] text-white' : 'bg-gray-100 text-gray-600'}`}>
@@ -552,36 +604,43 @@ export default function AdminApp() {
               <Eye className="w-4 h-4" /> <span>Front-Page Preview</span>
             </button>
           </div>
-          <button onClick={handleAdminLogout} className="w-full sm:w-auto px-3 py-1.5 text-xs font-bold bg-red-50 text-red-600 rounded-lg hover:bg-red-100 flex items-center justify-center space-x-1.5">
-            <LogOut className="w-3.5 h-3.5" /> <span>Déconnexion</span>
-          </button>
+          
+          <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
+            <button onClick={toggleHideFigures} className={`px-3 py-1.5 text-xs font-bold rounded-lg flex items-center space-x-1.5 transition-colors ${!isFiguresHidden ? 'bg-amber-100 text-amber-800' : 'bg-zinc-100 text-zinc-700'}`}>
+              {isFiguresHidden ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              <span>{isFiguresHidden ? 'Afficher les Chiffres' : 'Masquer Chiffres'}</span>
+            </button>
+            <button onClick={handleAdminLogout} className="px-3 py-1.5 text-xs font-bold bg-red-50 text-red-600 rounded-lg hover:bg-red-100 flex items-center justify-center space-x-1.5">
+              <LogOut className="w-3.5 h-3.5" /> <span>Déconnexion</span>
+            </button>
+          </div>
         </div>
 
-        {/* FINANCIAL METRICS */}
+        {/* FINANCIAL METRICS (SECURED VIA SUPABASE AUTH) */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Total Achat Initial</p>
-            <p className="text-sm sm:text-lg font-black text-gray-900 mt-1">{totalInventoryCost.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-gray-900 mt-1">{isFiguresHidden ? '••••••••' : `${totalInventoryCost.toLocaleString()} FCFA`}</p>
           </div>
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Total Vente Initiale</p>
-            <p className="text-sm sm:text-lg font-black text-indigo-600 mt-1">{totalExpectedRevenue.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-indigo-600 mt-1">{isFiguresHidden ? '••••••••' : `${totalExpectedRevenue.toLocaleString()} FCFA`}</p>
           </div>
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Valeur Stock Actuel</p>
-            <p className="text-sm sm:text-lg font-black text-orange-600 mt-1">{totalPotentialRetail.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-orange-600 mt-1">{isFiguresHidden ? '••••••••' : `${totalPotentialRetail.toLocaleString()} FCFA`}</p>
           </div>
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Coût March. Vendues</p>
-            <p className="text-sm sm:text-lg font-black text-purple-600 mt-1">{totalGoodsSoldCost.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-purple-600 mt-1">{isFiguresHidden ? '••••••••' : `${totalGoodsSoldCost.toLocaleString()} FCFA`}</p>
           </div>
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Total Ventes</p>
-            <p className="text-sm sm:text-lg font-black text-blue-600 mt-1">{totalSalesRevenue.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-blue-600 mt-1">{isFiguresHidden ? '••••••••' : `${totalSalesRevenue.toLocaleString()} FCFA`}</p>
           </div>
           <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
             <p className="text-[10px] font-extrabold uppercase text-gray-400">Dettes Restantes</p>
-            <p className="text-sm sm:text-lg font-black text-red-600 mt-1">{totalOutstandingDebt.toLocaleString()} FCFA</p>
+            <p className="text-sm sm:text-lg font-black text-red-600 mt-1">{isFiguresHidden ? '••••••••' : `${totalOutstandingDebt.toLocaleString()} FCFA`}</p>
           </div>
         </div>
 
@@ -760,8 +819,48 @@ export default function AdminApp() {
             </div>
 
             <div className="lg:col-span-2 space-y-6">
+
+              {/* DEBTORS & REMINDER BOX */}
+              <div className="bg-amber-50 border border-amber-200 p-5 rounded-xl shadow-xs space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-amber-200">
+                  <h4 className="font-black text-xs uppercase tracking-wide text-amber-900 flex items-center">
+                    <Bell className="w-4 h-4 mr-1.5 text-amber-600 animate-bounce" /> Suivi des Débiteurs & Rappels de Paiement (+7 Jours)
+                  </h4>
+                  <span className="bg-amber-200 text-amber-900 font-bold px-2.5 py-0.5 rounded-full text-xs">
+                    {debtorsList.length} débiteur(s)
+                  </span>
+                </div>
+                {debtorsList.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {debtorsList.map(debtor => (
+                      <div key={debtor.id} className="bg-white p-3 rounded-lg border border-amber-200 shadow-xs flex flex-col justify-between space-y-2">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <p className="font-extrabold text-sm text-gray-900">{debtor.name}</p>
+                            <p className="text-[11px] text-gray-500 flex items-center"><Phone className="w-3 h-3 mr-1" /> {debtor.phone || 'N/A'}</p>
+                          </div>
+                          <span className="text-xs font-black text-red-600 bg-red-50 px-2 py-0.5 rounded">
+                            {debtor.totalDebt.toLocaleString()} FCFA
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-[11px]">
+                          <span className="text-gray-500 flex items-center font-semibold">
+                            <Calendar className="w-3 h-3 mr-1 text-amber-600" /> Prochain Paiement:
+                          </span>
+                          <span className="font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded">
+                            {getNextPaymentDate(debtor)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-700 italic">Aucun client n'a de dette en cours. Tout est réglé !</p>
+                )}
+              </div>
+
               <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <h3 className="font-bold text-xs uppercase tracking-wide text-gray-700 mb-4 pb-2 border-b">Balances Clients & Historique</h3>
+                <h3 className="font-bold text-xs uppercase tracking-wide text-gray-700 mb-4 pb-2 border-b">Balances Clients & Historique (Sécurisé par Mot de Passe Admin)</h3>
                 
                 {editingCustomer && (
                   <form onSubmit={handleSaveCustomerEdit} className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-xl space-y-3">
@@ -778,62 +877,85 @@ export default function AdminApp() {
                 )}
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {customers.map(c => (
-                    <div key={c.id} className="border rounded-xl p-4 bg-gray-50 flex flex-col justify-between space-y-3">
-                      <div>
-                        <div className="flex justify-between items-start mb-2">
-                          <div>
-                            <h4 className="font-black text-sm">{c.name}</h4>
-                            <p className="text-[11px] text-gray-500 flex items-center mt-0.5"><Phone className="w-3 h-3 mr-1" /> {c.phone || 'Pas de téléphone'}</p>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <button onClick={() => setEditingCustomer(c)} className="text-gray-400 hover:text-blue-600"><Pencil className="w-3.5 h-3.5" /></button>
-                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${c.totalDebt > 0 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
-                              Dette: {c.totalDebt.toLocaleString()} FCFA
-                            </span>
-                          </div>
-                        </div>
-                        
-                        {c.totalDebt > 0 && (
-                          <form onSubmit={(e) => handleRecordPayment(e, c.id, c.totalDebt)} className="mt-3 flex space-x-2">
-                            <input type="number" placeholder="Montant du paiement" value={paymentForm.customerId === c.id ? paymentForm.amount : ''} onChange={e => setPaymentForm({ amount: e.target.value, customerId: c.id })} className="w-full border p-1.5 text-xs rounded bg-white" required />
-                            <button type="submit" className="bg-green-600 text-white text-[10px] px-3 rounded font-bold whitespace-nowrap">Régler Dette</button>
-                          </form>
-                        )}
-                      </div>
+                  {customers.map(c => {
+                    const isUnlocked = unlockedCustomers[c.id];
 
-                      <div className="pt-2 border-t">
-                        <p className="text-[10px] font-bold text-gray-400 mb-1">HISTORIQUE DES VENTES:</p>
-                        <ul className="text-[10px] space-y-1.5 text-gray-600 max-h-40 overflow-y-auto pr-1">
-                          {c.history.map((h, i) => (
-                            <li key={i} className="bg-white p-2.5 rounded border border-gray-100 flex flex-col space-y-1.5 shadow-sm">
-                              <div className="flex justify-between items-start">
-                                <div>
-                                  <span className="font-bold text-gray-700">{h.date}</span>
-                                  <p className="text-gray-600 mt-0.5">{h.goods} <span className="text-orange-600 font-bold">({h.batch || h.type})</span></p>
-                                </div>
-                                <div className="text-right whitespace-nowrap ml-2">
-                                  <div>Total: <span className="font-bold">{h.total?.toLocaleString()}</span></div>
-                                  <div>Payé: <span className="text-green-600 font-bold">{h.paid?.toLocaleString()}</span></div>
-                                </div>
-                              </div>
-                              {/* ACTION BUTTONS FOR EDITING/DELETING SALES */}
-                              {h.type === 'Sale' && h.items && h.items.length > 0 && (
-                                <div className="flex space-x-3 pt-1.5 border-t border-gray-50 mt-1">
-                                  <button onClick={() => setEditingSale({...h, customerId: c.id, originalItems: JSON.parse(JSON.stringify(h.items))})} className="text-blue-500 hover:text-blue-700 font-bold flex items-center">
-                                    <Pencil className="w-3 h-3 mr-1"/> Modifier
-                                  </button>
-                                  <button onClick={() => handleDeleteSale(c.id, h)} className="text-red-500 hover:text-red-700 font-bold flex items-center">
-                                    <Trash2 className="w-3 h-3 mr-1"/> Annuler Vente
-                                  </button>
-                                </div>
+                    return (
+                      <div key={c.id} className="border rounded-xl p-4 bg-gray-50 flex flex-col justify-between space-y-3 relative">
+                        <div>
+                          <div className="flex justify-between items-start mb-2">
+                            <div>
+                              <h4 className="font-black text-sm text-gray-900">{c.name}</h4>
+                              <p className="text-[11px] text-gray-500 flex items-center mt-0.5"><Phone className="w-3 h-3 mr-1" /> {c.phone || 'Pas de téléphone'}</p>
+                            </div>
+                            
+                            <div className="flex items-center space-x-2">
+                              <button onClick={() => setEditingCustomer(c)} className="text-gray-400 hover:text-blue-600"><Pencil className="w-3.5 h-3.5" /></button>
+                              
+                              <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${c.totalDebt > 0 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
+                                Dette: {isUnlocked ? `${c.totalDebt.toLocaleString()} FCFA` : '••••••••'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {!isUnlocked ? (
+                            <div className="my-3 p-4 bg-zinc-900/5 border border-dashed border-zinc-300 rounded-lg text-center space-y-2">
+                              <p className="text-xs text-zinc-600 font-medium">Les détails et l'historique de ce client sont masqués par sécurité.</p>
+                              <button 
+                                onClick={() => handleUnlockCustomer(c.id)} 
+                                className="inline-flex items-center space-x-1.5 bg-zinc-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors"
+                              >
+                                <Lock className="w-3.5 h-3.5 text-amber-400" />
+                                <span>Voir les détails (Mot de passe admin requis)</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              {c.totalDebt > 0 && (
+                                <form onSubmit={(e) => handleRecordPayment(e, c.id, c.totalDebt)} className="mt-3 flex space-x-2">
+                                  <input type="number" placeholder="Montant du paiement" value={paymentForm.customerId === c.id ? paymentForm.amount : ''} onChange={e => setPaymentForm({ amount: e.target.value, customerId: c.id })} className="w-full border p-1.5 text-xs rounded bg-white" required />
+                                  <button type="submit" className="bg-green-600 text-white text-[10px] px-3 rounded font-bold whitespace-nowrap">Régler Dette</button>
+                                </form>
                               )}
-                            </li>
-                          ))}
-                        </ul>
+
+                              <div className="pt-2 border-t mt-3">
+                                <div className="flex justify-between items-center mb-1">
+                                  <p className="text-[10px] font-bold text-gray-400">HISTORIQUE DES VENTES:</p>
+                                  <button onClick={() => setUnlockedCustomers(prev => ({ ...prev, [c.id]: false }))} className="text-[10px] text-blue-600 hover:underline">Verrouiller à nouveau</button>
+                                </div>
+                                <ul className="text-[10px] space-y-1.5 text-gray-600 max-h-40 overflow-y-auto pr-1">
+                                  {c.history.map((h, i) => (
+                                    <li key={i} className="bg-white p-2.5 rounded border border-gray-100 flex flex-col space-y-1.5 shadow-sm">
+                                      <div className="flex justify-between items-start">
+                                        <div>
+                                          <span className="font-bold text-gray-700">{h.date}</span>
+                                          <p className="text-gray-600 mt-0.5">{h.goods} <span className="text-orange-600 font-bold">({h.batch || h.type})</span></p>
+                                        </div>
+                                        <div className="text-right whitespace-nowrap ml-2">
+                                          <div>Total: <span className="font-bold">{h.total?.toLocaleString()}</span></div>
+                                          <div>Payé: <span className="text-green-600 font-bold">{h.paid?.toLocaleString()}</span></div>
+                                        </div>
+                                      </div>
+                                      {h.type === 'Sale' && h.items && h.items.length > 0 && (
+                                        <div className="flex space-x-3 pt-1.5 border-t border-gray-50 mt-1">
+                                          <button onClick={() => setEditingSale({...h, customerId: c.id, originalItems: JSON.parse(JSON.stringify(h.items))})} className="text-blue-500 hover:text-blue-700 font-bold flex items-center">
+                                            <Pencil className="w-3 h-3 mr-1"/> Modifier
+                                          </button>
+                                          <button onClick={() => handleDeleteSale(c.id, h)} className="text-red-500 hover:text-red-700 font-bold flex items-center">
+                                            <Trash2 className="w-3 h-3 mr-1"/> Annuler Vente
+                                          </button>
+                                        </div>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {customers.length === 0 && (
                     <div className="col-span-full text-center py-12 text-gray-400 text-xs bg-gray-50 rounded-xl border border-dashed border-gray-200">
                       Aucun client enregistré.
