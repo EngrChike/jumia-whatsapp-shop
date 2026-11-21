@@ -39,6 +39,7 @@ export default function AdminApp() {
   const [customers, setCustomers] = useState([]);
   const [editingCustomer, setEditingCustomer] = useState(null);
   const [editingSale, setEditingSale] = useState(null);
+  const [editingPayment, setEditingPayment] = useState(null);
 
   const [ledgerForm, setLedgerForm] = useState({ 
     customerId: '', 
@@ -526,6 +527,73 @@ export default function AdminApp() {
     } catch (err) { alert(`Erreur de paiement: ${err.message}`); }
   };
 
+  const handleDeletePayment = async (customerId, paymentRecord) => {
+    const refundedAmount = parseFloat(paymentRecord.paid) || 0;
+    if (!window.confirm(`Supprimer ce paiement de ${refundedAmount.toLocaleString()} FCFA ? Le montant sera remis sur la dette de ce client.`)) return;
+
+    try {
+      const customer = customers.find(c => String(c.id) === String(customerId));
+      const restoredDebt = (parseFloat(customer?.totalDebt) || 0) + refundedAmount;
+
+      const { error: custErr } = await supabase
+        .from('customers')
+        .update({ total_debt: restoredDebt })
+        .eq('id', customerId);
+      if (custErr) throw custErr;
+
+      const { error: histErr } = await supabase
+        .from('customer_history')
+        .delete()
+        .eq('id', paymentRecord.id);
+      if (histErr) throw histErr;
+
+      await fetchCustomersFromSupabase();
+      alert('Paiement supprimé et montant retourné sur la dette du client.');
+    } catch (err) {
+      alert(`Erreur lors de la suppression du paiement: ${err.message}`);
+    }
+  };
+
+  const handleSavePaymentEdit = async (e) => {
+    e.preventDefault();
+    if (!editingPayment) return;
+
+    const newPaidAmount = parseFloat(editingPayment.paid);
+    if (isNaN(newPaidAmount) || newPaidAmount < 0) {
+      alert("Veuillez saisir un montant valide.");
+      return;
+    }
+
+    try {
+      const oldPaidAmount = parseFloat(editingPayment.originalPaid) || 0;
+      const paidDelta = newPaidAmount - oldPaidAmount;
+
+      const customer = customers.find(c => String(c.id) === String(editingPayment.customerId));
+      const updatedDebt = Math.max(0, (parseFloat(customer?.totalDebt) || 0) - paidDelta);
+
+      const { error: custErr } = await supabase
+        .from('customers')
+        .update({ total_debt: updatedDebt })
+        .eq('id', editingPayment.customerId);
+      if (custErr) throw custErr;
+
+      const { error: histErr } = await supabase
+        .from('customer_history')
+        .update({
+          paid: newPaidAmount,
+          date: editingPayment.date || new Date().toISOString().split('T')[0]
+        })
+        .eq('id', editingPayment.id);
+      if (histErr) throw histErr;
+
+      setEditingPayment(null);
+      await fetchCustomersFromSupabase();
+      alert('Paiement modifié et dette mise à jour.');
+    } catch (err) {
+      alert(`Erreur lors de la modification du paiement: ${err.message}`);
+    }
+  };
+
   const handleSaveCustomerEdit = async (e) => {
     e.preventDefault();
     if (!editingCustomer) return;
@@ -938,22 +1006,25 @@ export default function AdminApp() {
 
                               <div className="pt-2 border-t mt-3">
                                 <div className="flex justify-between items-center mb-1">
-                                  <p className="text-[10px] font-bold text-gray-400">HISTORIQUE DES VENTES:</p>
+                                  <p className="text-[10px] font-bold text-gray-400">HISTORIQUE DES VENTES & PAIEMENTS:</p>
                                   <button onClick={() => setUnlockedCustomers(prev => ({ ...prev, [c.id]: false }))} className="text-[10px] text-blue-600 hover:underline">Verrouiller à nouveau</button>
                                 </div>
                                 <ul className="text-[10px] space-y-1.5 text-gray-600 max-h-40 overflow-y-auto pr-1">
                                   {c.history.map((h, i) => (
-                                    <li key={i} className="bg-white p-2.5 rounded border border-gray-100 flex flex-col space-y-1.5 shadow-sm">
+                                    <li key={h.id || i} className="bg-white p-2.5 rounded border border-gray-100 flex flex-col space-y-1.5 shadow-sm">
                                       <div className="flex justify-between items-start">
                                         <div>
                                           <span className="font-bold text-gray-700">{h.date}</span>
                                           <p className="text-gray-600 mt-0.5">{h.goods} <span className="text-orange-600 font-bold">({h.batch || h.type})</span></p>
                                         </div>
                                         <div className="text-right whitespace-nowrap ml-2">
-                                          <div>Total: <span className="font-bold">{h.total?.toLocaleString()}</span></div>
+                                          {h.type !== 'Payment' && (
+                                            <div>Total: <span className="font-bold">{h.total?.toLocaleString()}</span></div>
+                                          )}
                                           <div>Payé: <span className="text-green-600 font-bold">{h.paid?.toLocaleString()}</span></div>
                                         </div>
                                       </div>
+
                                       {h.type === 'Sale' && h.items && h.items.length > 0 && (
                                         <div className="flex space-x-3 pt-1.5 border-t border-gray-50 mt-1">
                                           <button onClick={() => setEditingSale({...h, customerId: c.id, originalItems: JSON.parse(JSON.stringify(h.items))})} className="text-blue-500 hover:text-blue-700 font-bold flex items-center">
@@ -961,6 +1032,29 @@ export default function AdminApp() {
                                           </button>
                                           <button onClick={() => handleDeleteSale(c.id, h)} className="text-red-500 hover:text-red-700 font-bold flex items-center">
                                             <Trash2 className="w-3 h-3 mr-1"/> Annuler Vente
+                                          </button>
+                                        </div>
+                                      )}
+
+                                      {h.type === 'Payment' && (
+                                        <div className="flex space-x-3 pt-1.5 border-t border-gray-50 mt-1">
+                                          <button
+                                            onClick={() => setEditingPayment({
+                                              id: h.id,
+                                              customerId: c.id,
+                                              date: h.date || new Date().toISOString().split('T')[0],
+                                              paid: h.paid || 0,
+                                              originalPaid: h.paid || 0
+                                            })}
+                                            className="text-blue-500 hover:text-blue-700 font-bold flex items-center"
+                                          >
+                                            <Pencil className="w-3 h-3 mr-1"/> Edit
+                                          </button>
+                                          <button
+                                            onClick={() => handleDeletePayment(c.id, h)}
+                                            className="text-red-500 hover:text-red-700 font-bold flex items-center"
+                                          >
+                                            <Trash2 className="w-3 h-3 mr-1"/> Delete
                                           </button>
                                         </div>
                                       )}
@@ -991,7 +1085,7 @@ export default function AdminApp() {
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-4 border-b gap-2">
               <div>
                 <h3 className="font-black text-sm uppercase tracking-wide text-gray-900">Aperçu Front-Page (Catalogue Public)</h3>
-                <p className="text-xs text-gray-500 mt-0.5">Seuls les articles non-archivés avec au moins 1 produit en stock (quantité &gt;= 1) sont affichés ici.</p>
+                <p className="text-xs text-gray-500 mt-0.5">Seuls les articles non-archivés avec au moins 1 produit en stock (quantité {'>='} 1) sont affichés ici.</p>
               </div>
               <span className="bg-green-100 text-green-800 text-xs font-bold px-3 py-1 rounded-full">{frontPageProducts.length} articles visibles</span>
             </div>
@@ -1046,6 +1140,59 @@ export default function AdminApp() {
               <div className="flex space-x-2 pt-1">
                 <button type="button" onClick={() => setIsPasswordModalOpen(false)} className="flex-1 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-xl uppercase">Annuler</button>
                 <button type="submit" className="flex-1 py-2.5 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold rounded-xl uppercase tracking-wider">Déverrouiller</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* EDITING PAYMENT MODAL POPUP */}
+      {editingPayment && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white p-6 rounded-xl w-full max-w-md space-y-4 shadow-xl border border-gray-200">
+            <div className="flex justify-between items-center border-b pb-2">
+              <h3 className="font-black text-base text-gray-900">Modifier le Paiement</h3>
+              <button type="button" onClick={() => setEditingPayment(null)} className="text-gray-400 hover:text-gray-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePaymentEdit} className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500 block mb-1">Montant Payé (FCFA)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={editingPayment.paid}
+                  onChange={(e) => setEditingPayment({ ...editingPayment, paid: e.target.value })}
+                  className="w-full border p-2.5 text-sm rounded-lg font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500 block mb-1">Date du Paiement</label>
+                <input
+                  type="date"
+                  value={editingPayment.date}
+                  onChange={(e) => setEditingPayment({ ...editingPayment, date: e.target.value })}
+                  className="w-full border p-2.5 text-xs rounded-lg"
+                  required
+                />
+              </div>
+
+              <div className="bg-blue-50 p-3 rounded-lg border border-blue-200 text-xs text-blue-900 font-medium">
+                La dette du client sera automatiquement ajustée selon la différence entre l'ancien et le nouveau montant.
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-2">
+                <button type="button" onClick={() => setEditingPayment(null)} className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-bold rounded-lg uppercase">
+                  Annuler
+                </button>
+                <button type="submit" className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg uppercase tracking-wide">
+                  Enregistrer
+                </button>
               </div>
             </form>
           </div>
